@@ -9,8 +9,8 @@ from typing import Any, Sequence
 
 import numpy as np
 import sentencepiece as spm
+import soundfile as sf
 import torch
-import torchaudio
 
 from moss_tts_nano.defaults import DEFAULT_OUTPUT_DIR
 from text_normalization_pipeline import WeTextProcessingManager, prepare_tts_request_texts
@@ -443,12 +443,24 @@ class OnnxTtsRuntime(OrtCpuRuntime):
         )
 
     def _load_reference_audio(self, reference_audio_path: str | Path) -> np.ndarray:
-        waveform, sample_rate = torchaudio.load(str(Path(reference_audio_path).expanduser().resolve()))
-        waveform = waveform.to(torch.float32)
+        # Use soundfile instead of torchaudio to avoid torchcodec dependency
+        waveform, sample_rate = sf.read(str(Path(reference_audio_path).expanduser().resolve()))
+        # soundfile returns (samples, channels), we need (channels, samples)
+        if waveform.ndim == 1:
+            waveform = waveform.reshape(-1, 1)
+        waveform = waveform.T.astype(np.float32)  # (channels, samples)
+        waveform = torch.from_numpy(waveform)
+
         target_sample_rate = int(self.codec_meta["codec_config"]["sample_rate"])
         target_channels = int(self.codec_meta["codec_config"]["channels"])
         if sample_rate != target_sample_rate:
-            waveform = torchaudio.functional.resample(waveform, sample_rate, target_sample_rate)
+            # Simple resampling using torch
+            waveform = torch.nn.functional.interpolate(
+                waveform.unsqueeze(0),
+                size=int(waveform.shape[1] * target_sample_rate / sample_rate),
+                mode='linear',
+                align_corners=False
+            ).squeeze(0)
         current_channels = int(waveform.shape[0])
         if current_channels == target_channels:
             pass

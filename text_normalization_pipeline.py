@@ -77,17 +77,13 @@ class WeTextProcessingManager:
         return
 
     def _run(self) -> None:
-        if not self._available:
-            self._set_state(
-                state="failed",
-                message="WeTextProcessing unavailable.",
-                error="installed WeTextProcessing modules are unavailable",
-            )
-            return
         try:
             self._set_state(state="running", message="Loading WeTextProcessing graphs.", error=None)
             self._ensure_normalizers_loaded()
-            self._set_state(state="ready", message="WeTextProcessing ready. languages=zh,en", error=None)
+            if self._available:
+                self._set_state(state="ready", message="WeTextProcessing ready. languages=zh,en", error=None)
+            else:
+                self._set_state(state="ready", message="Simple text passthrough mode (WeTextProcessing unavailable).", error=None)
         except Exception as exc:
             logging.exception("WeTextProcessing preload failed")
             self._set_state(state="failed", message="WeTextProcessing preload failed.", error=str(exc))
@@ -97,24 +93,46 @@ class WeTextProcessingManager:
             if self._normalizers is not None:
                 return self._normalizers
 
-            from tn.chinese.normalizer import Normalizer as ZhNormalizer
-            from tn.english.normalizer import Normalizer as EnNormalizer
+            # Try to load WeTextProcessing normalizers, fall back to simple passthrough
+            try:
+                from tn.chinese.normalizer import Normalizer as ZhNormalizer
+                from tn.english.normalizer import Normalizer as EnNormalizer
 
-            logging.getLogger().setLevel(logging.INFO)
-            self._normalizers = {
-                "zh": ZhNormalizer(
-                    cache_dir=str(CUSTOM_ZH_WETEXT_CACHE_DIR),
-                    overwrite_cache=False,
-                    remove_interjections=False,
-                    remove_erhua=False,
-                    full_to_half=False,
-                ),
-                "en": EnNormalizer(overwrite_cache=False),
-            }
+                logging.getLogger().setLevel(logging.INFO)
+                self._normalizers = {
+                    "zh": ZhNormalizer(
+                        cache_dir=str(CUSTOM_ZH_WETEXT_CACHE_DIR),
+                        overwrite_cache=False,
+                        remove_interjections=False,
+                        remove_erhua=False,
+                        full_to_half=False,
+                    ),
+                    "en": EnNormalizer(overwrite_cache=False),
+                }
+                self._available = True
+            except ImportError:
+                logging.warning("WeTextProcessing (tn module) not available, using simple text passthrough")
+                # Simple passthrough normalizer for when WeTextProcessing is not available
+                class SimpleNormalizer:
+                    def normalize(self, text: str) -> str:
+                        # Basic text cleanup - just return the text as-is after stripping
+                        return text.strip() if text else ""
+
+                self._normalizers = {
+                    "zh": SimpleNormalizer(),
+                    "en": SimpleNormalizer(),
+                }
+                self._available = False
             return self._normalizers
 
     def normalize(self, *, text: str, prompt_text: str, language: str) -> tuple[str, str]:
         snapshot = self.ensure_ready()
+
+        # In fallback mode (WeTextProcessing unavailable), use simple passthrough
+        if snapshot.state == "failed" and not snapshot.available:
+            # Simple passthrough without WeTextProcessing
+            return text.strip() if text else "", prompt_text.strip() if prompt_text else ""
+
         if not snapshot.ready:
             raise RuntimeError(snapshot.error or snapshot.message)
 

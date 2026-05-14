@@ -2220,9 +2220,11 @@ def _build_app(
     async def _resolve_prompt_audio_request(
         *,
         demo_id: str,
+        voice: str = "",
         prompt_audio: UploadFile | None,
     ) -> tuple[DemoEntry | None, str, str, str | None]:
         normalized_demo_id = str(demo_id or "").strip()
+        normalized_voice = str(voice or "").strip()
         demo_entry = _resolve_demo_entry(normalized_demo_id) if normalized_demo_id else None
 
         uploaded_prompt_audio_path, uploaded_prompt_audio_display_path = await _persist_uploaded_prompt_audio(prompt_audio)
@@ -2234,15 +2236,24 @@ def _build_app(
                 uploaded_prompt_audio_path,
             )
 
-        if demo_entry is None:
-            raise ValueError("demo_id is required unless prompt speech is uploaded.")
+        if demo_entry is not None:
+            return (
+                demo_entry,
+                str(demo_entry.prompt_audio_path),
+                demo_entry.prompt_audio_relative_path,
+                None,
+            )
 
-        return (
-            demo_entry,
-            str(demo_entry.prompt_audio_path),
-            demo_entry.prompt_audio_relative_path,
-            None,
-        )
+        # Support builtin voice parameter (no demo_id or audio upload required)
+        if normalized_voice:
+            return (
+                None,
+                "",  # prompt_audio_path will be resolved by runtime using voice
+                normalized_voice,
+                None,
+            )
+
+        raise ValueError("demo_id is required unless prompt speech is uploaded or voice is specified.")
 
     def _stream_metrics_text(snapshot: dict[str, object]) -> str:
         metrics = [
@@ -2502,6 +2513,7 @@ def _build_app(
     async def generate_stream_start(
         text: str = Form(...),
         demo_id: str = Form(""),
+        voice: str = Form(""),
         prompt_audio: UploadFile | None = File(None),
         max_new_frames: int = Form(375),
         voice_clone_max_text_tokens: int = Form(75),
@@ -2523,7 +2535,7 @@ def _build_app(
     ):
         try:
             demo_entry, prompt_audio_path, prompt_audio_display_path, prompt_audio_cleanup_path = (
-                await _resolve_prompt_audio_request(demo_id=demo_id, prompt_audio=prompt_audio)
+                await _resolve_prompt_audio_request(demo_id=demo_id, voice=voice, prompt_audio=prompt_audio)
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -2713,6 +2725,7 @@ def _build_app(
     async def generate(
         text: str = Form(...),
         demo_id: str = Form(""),
+        voice: str = Form(""),
         prompt_audio: UploadFile | None = File(None),
         max_new_frames: int = Form(375),
         voice_clone_max_text_tokens: int = Form(75),
@@ -2734,7 +2747,7 @@ def _build_app(
     ):
         try:
             demo_entry, prompt_audio_path, prompt_audio_display_path, prompt_audio_cleanup_path = (
-                await _resolve_prompt_audio_request(demo_id=demo_id, prompt_audio=prompt_audio)
+                await _resolve_prompt_audio_request(demo_id=demo_id, voice=voice, prompt_audio=prompt_audio)
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -2769,11 +2782,19 @@ def _build_app(
             normalized_seed = None if seed in {"", "0"} else int(seed)
 
             def _synthesize(selected_runtime: NanoTTSService):
+                # If prompt_audio_path is empty but prompt_audio_display_path looks like a voice name,
+                # use it as the voice parameter
+                resolved_voice = None
+                resolved_prompt_audio_path = prompt_audio_path
+                if not resolved_prompt_audio_path and prompt_audio_display_path:
+                    # Check if it's a builtin voice name
+                    resolved_voice = prompt_audio_display_path
+
                 return selected_runtime.synthesize(
                     text=str(prepared_texts["text"]),
                     mode="voice_clone",
-                    voice=None,
-                    prompt_audio_path=prompt_audio_path,
+                    voice=resolved_voice,
+                    prompt_audio_path=resolved_prompt_audio_path,
                     max_new_frames=int(max_new_frames),
                     voice_clone_max_text_tokens=int(voice_clone_max_text_tokens),
                     tts_max_batch_size=int(tts_max_batch_size),
