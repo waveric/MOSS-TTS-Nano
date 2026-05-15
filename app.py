@@ -2459,6 +2459,18 @@ def _build_app(
             ),
         }
 
+    @app.get("/api/voices")
+    async def list_voices():
+        """List available builtin voice presets."""
+        # runtime might be OnnxNanoTTSServiceAdapter which wraps the actual runtime
+        actual_runtime = getattr(runtime, 'runtime', runtime)
+        voices = actual_runtime.list_builtin_voices()
+        return {
+            "voices": [v.get("voice") for v in voices],
+            "voices_detail": voices,
+            "default_voice": voices[0].get("voice") if voices else None,
+        }
+
     @app.get("/api/warmup-status")
     async def warmup_status():
         snapshot = warmup_manager.snapshot()
