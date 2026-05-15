@@ -20,6 +20,7 @@ from typing import Callable, Iterator, Optional, Sequence, TypeVar
 import numpy as np
 import torch
 import uvicorn
+from scipy import signal as scipy_signal
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
@@ -559,6 +560,52 @@ def _audio_to_wav_bytes(audio_array, sample_rate: int) -> bytes:
 
     buffer.seek(0)
     return buffer.read()
+
+
+def _resample_audio(audio_bytes: bytes, orig_sr: int, target_sr: int) -> tuple[bytes, int]:
+    """重采样音频到目标采样率
+
+    Args:
+        audio_bytes: WAV 格式的音频字节
+        orig_sr: 原始采样率
+        target_sr: 目标采样率
+
+    Returns:
+        (重采样后的 WAV 字节, 新采样率)
+    """
+    if orig_sr == target_sr:
+        return audio_bytes, orig_sr
+
+    # 读取 WAV
+    with wave.open(io.BytesIO(audio_bytes), 'rb') as wf:
+        n_channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        frames = wf.readframes(wf.getnframes())
+
+    # 转为 numpy
+    audio_np = np.frombuffer(frames, dtype=np.int16)
+    if n_channels == 2:
+        audio_np = audio_np.reshape(-1, 2)
+
+    # 计算新长度
+    num_samples = int(len(audio_np) * target_sr / orig_sr)
+
+    # 重采样
+    resampled = scipy_signal.resample(audio_np, num_samples)
+
+    # 转回 int16
+    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+
+    # 写回 WAV
+    buffer = io.BytesIO()
+    with wave.open(buffer, 'wb') as wf:
+        wf.setnchannels(n_channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(target_sr)
+        wf.writeframes(resampled.tobytes())
+
+    buffer.seek(0)
+    return buffer.read(), target_sr
 
 
 def _audio_to_pcm16le_bytes(audio_array) -> bytes:
@@ -2756,6 +2803,7 @@ def _build_app(
         audio_top_k: int = Form(25),
         audio_repetition_penalty: float = Form(1.2),
         seed: str = Form("0"),
+        target_sample_rate: int = Form(0),  # 0 = 不重采样，保持原始采样率
     ):
         try:
             demo_entry, prompt_audio_path, prompt_audio_display_path, prompt_audio_cleanup_path = (
@@ -2845,6 +2893,13 @@ def _build_app(
                 )
             generated_audio_path = str(result["audio_path"])
             wav_bytes = _audio_to_wav_bytes(result["waveform_numpy"], int(result["sample_rate"]))
+            original_sample_rate = int(result["sample_rate"])
+
+            # 重采样到目标采样率（如果需要）
+            if target_sample_rate > 0 and target_sample_rate != original_sample_rate:
+                wav_bytes, new_sr = _resample_audio(wav_bytes, original_sample_rate, target_sample_rate)
+                result["sample_rate"] = new_sr
+
             return {
                 "audio_base64": base64.b64encode(wav_bytes).decode("ascii"),
                 "sample_rate": int(result["sample_rate"]),
